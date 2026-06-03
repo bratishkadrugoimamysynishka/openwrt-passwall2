@@ -9,7 +9,7 @@
 Для запуска установки со стандартными настройками выполните в терминале роутера следующую команду:
 
 ```bash
-rm -rf /tmp/openwrt-passwall2.sh ; wget -qO /tmp/openwrt-passwall2.sh "https://raw.githack.com/bratishkadrugoimamysynishka/openwrt-passwall2/main/installer.sh" ; INSTALL_ARGON=0 APPLY_SYSTEM_TUNING=0 sh /tmp/openwrt-passwall2.sh ; openwrt-passwall2.sh
+rm -rf /tmp/openwrt-passwall2.sh ; wget -qO /tmp/openwrt-passwall2.sh "https://raw.githack.com/bratishkadrugoimamysynishka/openwrt-passwall2/main/installer.sh" ; INSTALL_ARGON=0 APPLY_SYSTEM_TUNING=0 sh /tmp/openwrt-passwall2.sh
 ```
 
 ---
