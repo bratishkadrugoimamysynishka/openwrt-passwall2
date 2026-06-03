@@ -1,6 +1,6 @@
 # Автоматический установщик Passwall 2 + Argon для OpenWrt (APK)
 
-Скрипт `installer.sh` предназначен для быстрой, безопасной и отказоустойчивой установки прокси-клиента **Passwall 2** и современной темы оформления **Argon** на роутеры под управлением **OpenWrt 25.12+**, использующие новый пакетный менеджер `apk`.
+Скрипт `openwrt-passwall2.sh` предназначен для быстрой, безопасной и отказоустойчивой установки прокси-клиента **Passwall 2** и современной темы оформления **Argon** на роутеры под управлением **OpenWrt 25.12+**, использующие новый пакетный менеджер `apk`.
 
 ---
 
@@ -9,7 +9,7 @@
 Для запуска установки со стандартными настройками выполните в терминале роутера следующую команду:
 
 ```bash
-rm -rf /tmp/openwrt-passwall2.sh && wget -qO /tmp/openwrt-passwall2.sh "https://raw.githack.com/bratishkadrugoimamysynishka/openwrt-passwall2/main/installer.sh" && INSTALL_ARGON=0 APPLY_SYSTEM_TUNING=0 sh /tmp/openwrt-passwall2.sh
+rm -rf /tmp/openwrt-passwall2.sh ; wget -qO /tmp/openwrt-passwall2.sh "https://raw.githack.com/bratishkadrugoimamysynishka/openwrt-passwall2/main/installer.sh" ; INSTALL_ARGON=0 APPLY_SYSTEM_TUNING=0 sh /tmp/openwrt-passwall2.sh ; openwrt-passwall2.sh
 ```
 
 ---
