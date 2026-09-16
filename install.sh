@@ -1,17 +1,16 @@
 #!/bin/sh
 # ==============================================================================
 # Passwall 2 for OpenWrt (APK-only)
-# GPT+Claude v5 (без Argon, с выбором версии Passwall2)
+# GPT+Claude v5.1 (поддержка разных репозиториев)
 # Target:  OpenWrt 25.12+ with apk
 # Shell:   BusyBox / ash (POSIX)
 #
-# Изменения относительно v4:
-#   - удалена установка темы Argon (все связанные переменные и секции)
-#   - добавлена поддержка VERSION для скачивания конкретного тега
-#   - добавлена возможность переопределить репозиторий через REPO
+# Изменения относительно v5:
+#   - поддержка обоих вариантов именования архива зависимостей:
+#     packages_apk_${ARCH}.zip и passwall_packages_apk_${ARCH}.zip
 # ==============================================================================
 
-SCRIPT_VERSION="gpt+claude v5"
+SCRIPT_VERSION="gpt+claude v5.1"
 
 set -eu
 umask 022
@@ -20,7 +19,7 @@ umask 022
 # User options (env overrides)
 # -----------------------------
 # Если VERSION пуст — берётся latest.
-# Пример: VERSION="25.12.3-1" sh install.sh
+# Пример: VERSION="26.9.12-2" sh install.sh
 VERSION="${VERSION:-}"
 # Репозиторий Passwall2 (можно переопределить, если официальный не содержит assets)
 REPO="${REPO:-Openwrt-Passwall/openwrt-passwall2}"
@@ -662,7 +661,10 @@ PW_TAG="$(json_find_tag "$PASSWALL_JSON")"
 [ -n "$PW_TAG" ] && info "Релиз Passwall 2: $PW_TAG"
 
 PW_APK_URL="$(json_first_asset_url "$PASSWALL_JSON" '/luci-app-passwall2(-|_).*[.]apk$')"
-PW_ZIP_URL="$(json_first_asset_url "$PASSWALL_JSON" "/passwall_packages_apk_${ARCH}[.]zip$")"
+# Поддерживаем оба варианта именования архива зависимостей:
+#   - packages_apk_${ARCH}.zip       (репозиторий Openwrt-Passwall)
+#   - passwall_packages_apk_${ARCH}.zip (репозиторий xiaorouji)
+PW_ZIP_URL="$(json_first_asset_url "$PASSWALL_JSON" "(passwall_)?packages_apk_${ARCH}[.]zip$")"
 
 if [ -z "$PW_APK_URL" ]; then
     diagnose_json_failure "$PASSWALL_JSON" "Passwall 2 APK"
@@ -670,8 +672,8 @@ if [ -z "$PW_APK_URL" ]; then
 fi
 
 if [ -z "$PW_ZIP_URL" ]; then
-    diagnose_json_failure "$PASSWALL_JSON" "passwall_packages_apk_${ARCH}.zip"
-    die "Не найден архив зависимостей passwall_packages_apk_${ARCH}.zip для архитектуры '$ARCH'."
+    diagnose_json_failure "$PASSWALL_JSON" "packages_apk_${ARCH}.zip"
+    die "Не найден архив зависимостей packages_apk_${ARCH}.zip (или passwall_packages_apk_${ARCH}.zip) для архитектуры '$ARCH'."
 fi
 
 info "Нашёл APK: $PW_APK_URL"
