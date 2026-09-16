@@ -1,16 +1,18 @@
 #!/bin/sh
 # ==============================================================================
 # Passwall 2 for OpenWrt (APK-only)
-# GPT+Claude v5.1 (поддержка разных репозиториев)
+# GPT+Claude v5.2 (защита от OOM при установке luci-app-passwall2)
 # Target:  OpenWrt 25.12+ with apk
 # Shell:   BusyBox / ash (POSIX)
 #
-# Изменения относительно v5:
-#   - поддержка обоих вариантов именования архива зависимостей:
-#     packages_apk_${ARCH}.zip и passwall_packages_apk_${ARCH}.zip
+# Изменения относительно v5.1:
+#   - защита от OOM-killer при установке luci-app-passwall2:
+#     * сброс кешей (drop_caches) перед установкой
+#     * fallback на apk add --no-scripts при первой неудаче
+#     * ручной restart rpcd/uhttpd после --no-scripts
 # ==============================================================================
 
-SCRIPT_VERSION="gpt+claude v5.1"
+SCRIPT_VERSION="gpt+claude v5.2"
 
 set -eu
 umask 022
@@ -258,6 +260,21 @@ validate_release_json() {
     grep -q '"tag_name"' "$1" 2>/dev/null || return 1
     grep -q '"browser_download_url"' "$1" 2>/dev/null || return 1
     return 0
+}
+
+# Сброс кешей и вывод свободной памяти перед тяжёлой установкой.
+free_mem_before_apk() {
+    if [ -w /proc/sys/vm/drop_caches ]; then
+        sync
+        echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    fi
+    if have_cmd free; then
+        _mem_free="$(free 2>/dev/null | awk '/^Mem:/ {print $7}')"
+        case "$_mem_free" in
+            ''|*[!0-9]*) _mem_free=0 ;;
+        esac
+        info "Свободной памяти до установки APK: ${_mem_free} KB"
+    fi
 }
 
 # -----------------------------
@@ -662,7 +679,7 @@ PW_TAG="$(json_find_tag "$PASSWALL_JSON")"
 
 PW_APK_URL="$(json_first_asset_url "$PASSWALL_JSON" '/luci-app-passwall2(-|_).*[.]apk$')"
 # Поддерживаем оба варианта именования архива зависимостей:
-#   - packages_apk_${ARCH}.zip       (репозиторий Openwrt-Passwall)
+#   - packages_apk_${ARCH}.zip         (репозиторий Openwrt-Passwall)
 #   - passwall_packages_apk_${ARCH}.zip (репозиторий xiaorouji)
 PW_ZIP_URL="$(json_first_asset_url "$PASSWALL_JSON" "(passwall_)?packages_apk_${ARCH}[.]zip$")"
 
@@ -706,9 +723,35 @@ info "Ставлю зависимости Passwall 2..."
 install_apks_from_dir "$PW_DIR/pkgs" \
     || die "Не удалось установить зависимости Passwall 2."
 
+# --- Установка luci-app-passwall2 с защитой от OOM ---
+# На роутерах с малым объёмом RAM (256-512 MB) apk может быть убит
+# OOM-killer во время распаковки + post-upgrade скриптов пакета.
+# Освобождаем кеши и при первой неудаче пробуем --no-scripts.
 info "Ставлю / обновляю luci-app-passwall2..."
-apk add --allow-untrusted "$PW_DIR/luci-app-passwall2.apk" \
-    || die "Не удалось установить luci-app-passwall2."
+free_mem_before_apk
+
+if ! apk add --allow-untrusted "$PW_DIR/luci-app-passwall2.apk"; then
+    warn "Первая попытка установки luci-app-passwall2 не удалась (возможно OOM)."
+    warn "Повторяю с --no-scripts (post-install хуки пропускаются)..."
+
+    free_mem_before_apk
+
+    if ! apk add --allow-untrusted --no-scripts "$PW_DIR/luci-app-passwall2.apk"; then
+        die "Не удалось установить luci-app-passwall2 даже с --no-scripts."
+    fi
+
+    # Post-install скрипты пакета были пропущены — делаем минимально
+    # необходимое, чтобы LuCI увидел новые файлы. Passwall2 всё равно
+    # перезапустится ниже в разделе «Service reload».
+    service_do rpcd    restart
+    service_do uhttpd  restart
+
+    # Проверим, что init-скрипт пакета всё-таки на месте.
+    if [ ! -x /etc/init.d/passwall2 ]; then
+        warn "init-скрипт passwall2 отсутствует после --no-scripts."
+        warn "Проверь содержимое пакета вручную."
+    fi
+fi
 
 # -----------------------------
 # 8. System tuning
