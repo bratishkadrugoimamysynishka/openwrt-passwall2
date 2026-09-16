@@ -16,7 +16,7 @@
 
 echo "#############################################################"
 echo "# Запуск с дефолтными настройками (v5):"
-echo "rm -rf /tmp/openwrt-passwall2.sh ; wget -qO /tmp/openwrt-passwall2.sh \"https://raw.githack.com/bratishkadrugoimamysynishka/openwrt-passwall2/main/installer.sh\" ; sh /tmp/openwrt-passwall2.sh"
+echo "rm -rf /tmp/openwrt-passwall2.sh ; wget -qO /tmp/openwrt-passwall2.sh "https://raw.githack.com/bratishkadrugoimamysynishka/openwrt-passwall2/main/install.sh" ; sh /tmp/openwrt-passwall2.sh"
 echo "#############################################################"
 
 ---
