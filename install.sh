@@ -1,22 +1,17 @@
 #!/bin/sh
 # ==============================================================================
-# Passwall 2 + Argon for OpenWrt (APK-only)
-# GPT+Claude v2
+# Passwall 2 for OpenWrt (APK-only)
+# GPT+Claude v5 (без Argon, с выбором версии Passwall2)
 # Target:  OpenWrt 25.12+ with apk
 # Shell:   BusyBox / ash (POSIX)
 #
-# Изменения относительно v1:
-#   - wget больше не глушится через 2>/dev/null (видимый прогресс/ошибки)
-#   - скачивание через temp-файл с атомарным mv (как у ChatGPT)
-#   - упрощён цикл перебора зеркал без IFS-гимнастики
-#   - retry для apk add базовых пакетов (3 попытки)
-#   - дополнительная проверка распакованного ZIP (не пустой, .apk есть)
-#   - уникальный BACKUP_ROOT через timestamp+PID (избегает коллизий)
-#   - флаг INSECURE_HTTPS=1 для роутеров со сбитым временем
-#   - различные exit codes: 1 fatal error, 2 rollback done, 130+ signals
+# Изменения относительно v4:
+#   - удалена установка темы Argon (все связанные переменные и секции)
+#   - добавлена поддержка VERSION для скачивания конкретного тега
+#   - добавлена возможность переопределить репозиторий через REPO
 # ==============================================================================
 
-SCRIPT_VERSION="gpt+claude v4"
+SCRIPT_VERSION="gpt+claude v5"
 
 set -eu
 umask 022
@@ -24,7 +19,12 @@ umask 022
 # -----------------------------
 # User options (env overrides)
 # -----------------------------
-INSTALL_ARGON="${INSTALL_ARGON:-0}"
+# Если VERSION пуст — берётся latest.
+# Пример: VERSION="25.12.3-1" sh install.sh
+VERSION="${VERSION:-}"
+# Репозиторий Passwall2 (можно переопределить, если официальный не содержит assets)
+REPO="${REPO:-Openwrt-Passwall/openwrt-passwall2}"
+
 APPLY_SYSTEM_TUNING="${APPLY_SYSTEM_TUNING:-0}"
 AUTO_REBOOT="${AUTO_REBOOT:-0}"
 STRICT_APK_UPDATE="${STRICT_APK_UPDATE:-0}"
@@ -50,10 +50,7 @@ LOCKDIR="/tmp/passwall_install.lock"
 LOCKPID="$LOCKDIR/pid"
 WORKDIR="/tmp/passwall_install.$$"
 PW_DIR="$WORKDIR/passwall2"
-ARGON_DIR="$WORKDIR/argon"
 
-# Уникальный бэкап: timestamp + PID гарантирует уникальность даже при
-# параллельных запусках с секундной точностью и при отсутствии date (редко).
 _TS="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo manual)"
 BACKUP_ROOT="/root/passwall2-backup-${_TS}-$$"
 BACKUP_DIR="$BACKUP_ROOT/config"
@@ -236,24 +233,16 @@ acquire_lock() {
 }
 
 is_html_stub() {
-    # Ищем HTML-сигнатуры в первых 1024 байт.
-    # Флаг -a заставляет grep обрабатывать файл как текст (важно для бинарных
-    # файлов с null-байтами — иначе grep пропускает их после первого null).
     head -c 1024 "$1" 2>/dev/null | grep -qaiE '<html|<!doctype|<body|access denied|not found|rate limit'
 }
 
 validate_zip() {
-    # Для .zip архивов — unzip -tqq авторитетно проверяет целостность.
     [ -s "$1" ] || return 1
     is_html_stub "$1" && return 1
     unzip -tqq "$1" >/dev/null 2>&1
 }
 
 validate_apk_pkg() {
-    # Alpine APK — это tar.gz с подписью, не ZIP. Проверяем:
-    # 1) размер разумный (>= 16KB, меньше — почти наверняка HTML-заглушка)
-    # 2) нет HTML-маркеров в первых 1024 байтах
-    # Этого достаточно — если прокси/CDN отдали не то, любая из проверок сработает.
     [ -s "$1" ] || return 1
     _size="$(wc -c < "$1" 2>/dev/null | tr -d ' ')"
     case "$_size" in
@@ -275,11 +264,6 @@ validate_release_json() {
 # -----------------------------
 # HTTP fetcher
 # -----------------------------
-# Download-to-temp pattern:
-#   1) качаем в $OUT.part
-#   2) проверяем валидатором
-#   3) атомарно mv в $OUT только если всё ок
-# Так в $OUT никогда не лежит битый файл — важно для post-check и диагностики.
 _download_single() {
     _url="$1"
     _out="$2"
@@ -288,9 +272,6 @@ _download_single() {
 
     rm -f "$_tmp"
 
-    # НЕ глушим stderr (в отличие от v1): busybox wget на OpenWrt иногда
-    # ведёт себя иначе с -q vs без него, а видимый прогресс помогает понять
-    # что происходит на нестабильной сети.
     _wget_opts="-T 30 -O"
     if [ "$INSECURE_HTTPS" = "1" ] && have_cmd wget; then
         _wget_opts="--no-check-certificate $_wget_opts"
@@ -316,8 +297,6 @@ _download_single() {
         return 1
     fi
 
-    # КРИТИЧНО: busybox wget может вернуть exit 0 при SSL EOF в середине
-    # передачи, если какие-то байты уже получены. Валидатор ловит это.
     if [ -n "$_validator" ]; then
         if ! "$_validator" "$_tmp"; then
             rm -f "$_tmp"
@@ -325,7 +304,6 @@ _download_single() {
         fi
     fi
 
-    # Атомарное переименование — финальный файл существует только в целом виде.
     mv -f "$_tmp" "$_out" || {
         rm -f "$_tmp"
         return 1
@@ -356,37 +334,28 @@ _try_source() {
 }
 
 fetch_file() {
-    # usage: fetch_file URL OUTFILE [VALIDATOR]
     _url="$1"
     _out="$2"
     _validator="${3:-}"
 
-    # 1) Пробуем оригинальный URL (3 попытки).
     if _try_source "$_url" "$_out" "$_validator" 3; then
         return 0
     fi
 
-    # 2) Зеркала — только для релизов github.com, не для api.github.com.
     case "$_url" in
         https://github.com/*)
             warn "Оригинальный GitHub недоступен, пробую зеркала..."
-            # Упрощённый цикл: пробуем прокси по одному, без IFS-танцев.
-            # Пользовательский prefix — первый.
             if [ -n "$GITHUB_PROXY_PREFIX" ]; then
                 if _try_source "${GITHUB_PROXY_PREFIX}${_url}" "$_out" "$_validator" 3; then
                     return 0
                 fi
             fi
-            # Встроенные зеркала — каждое на отдельной строке в heredoc.
             echo "$_BUILTIN_MIRRORS" | while IFS= read -r _m; do
                 [ -n "$_m" ] || continue
-                # Важно: _try_source внутри pipe | while работает в subshell,
-                # поэтому возврат кода — единственный способ передать успех.
                 if _try_source "${_m}${_url}" "$_out" "$_validator" 3; then
-                    exit 0   # exit 0 ИЗ SUBSHELL (pipe)
+                    exit 0
                 fi
             done
-            # Проверяем код subshell. 0 = одно из зеркал сработало.
             if [ "$?" -eq 0 ] && [ -s "$_out" ]; then
                 return 0
             fi
@@ -425,7 +394,7 @@ diagnose_json_failure() {
     if grep -q '"message"[[:space:]]*:[[:space:]]*"[^"]*[Rr]ate limit' "$_file" 2>/dev/null; then
         warn "GitHub API вернул RATE LIMIT. Подожди час или используй VPN."
     elif grep -q '"message"[[:space:]]*:[[:space:]]*"Not Found"' "$_file" 2>/dev/null; then
-        warn "GitHub API вернул 'Not Found'. URL репозитория мог измениться."
+        warn "GitHub API вернул 'Not Found'. URL репозитория или тег могли измениться."
     elif grep -q '"message"[[:space:]]*:' "$_file" 2>/dev/null; then
         _msg="$(sed -n 's/.*"message"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_file" | head -1)"
         warn "GitHub API вернул ошибку: $_msg"
@@ -472,7 +441,6 @@ verify_required_package() {
     pkg_installed "$1" || die "Не установлен обязательный пакет: $1"
 }
 
-# apk add с ретраями — на случай сетевых флапов при скачивании пакетов.
 apk_add_with_retry() {
     _try=1
     _max=3
@@ -546,9 +514,8 @@ have_cmd wget || have_cmd uclient-fetch \
     || die "Скрипт рассчитан на APK-based OpenWrt (нужен /etc/os-release с OPENWRT_ARCH)."
 
 acquire_lock
-mkdir -p "$PW_DIR" "$ARGON_DIR" "$BACKUP_DIR"
+mkdir -p "$PW_DIR" "$BACKUP_DIR"
 
-# Свободное место: сначала /overlay (лимитирующий), затем fallback /.
 _FREE_DEV="/overlay"
 AVAILABLE_KB="$(df -k "$_FREE_DEV" 2>/dev/null | awk 'END {print $(NF-2)}')"
 case "$AVAILABLE_KB" in
@@ -590,8 +557,6 @@ ROLLBACK_NEEDED=1
 # -----------------------------
 # 3. Time sync (soft)
 # -----------------------------
-# HTTPS на только что загруженном роутере часто падает на "certificate not yet
-# valid" — время-то 1970-й год. Просим sysntpd синхронизировать.
 if [ -x /etc/init.d/sysntpd ]; then
     info "Синхронизирую время..."
     service_do sysntpd enable
@@ -673,11 +638,17 @@ DNSMASQ_WAS_REMOVED=0
 # -----------------------------
 PASSWALL_JSON="$PW_DIR/latest_passwall.json"
 
-info "Получаю актуальный релиз Passwall 2..."
-fetch_file \
-    "https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall2/releases/latest" \
-    "$PASSWALL_JSON" \
-    || die "Не удалось получить JSON релиза Passwall 2."
+# Формируем URL для API GitHub в зависимости от VERSION
+if [ -n "$VERSION" ]; then
+    _release_api_url="https://api.github.com/repos/${REPO}/releases/tags/${VERSION}"
+    info "Получаю релиз Passwall 2 версии: $VERSION"
+else
+    _release_api_url="https://api.github.com/repos/${REPO}/releases/latest"
+    info "Получаю последний релиз Passwall 2..."
+fi
+
+fetch_file "$_release_api_url" "$PASSWALL_JSON" \
+    || die "Не удалось получить JSON релиза Passwall 2 (${VERSION:-latest})."
 
 # Сохраним копию для диагностики (переживёт cleanup при die).
 cp -f "$PASSWALL_JSON" "/tmp/passwall2_api_response.json" 2>/dev/null || true
@@ -695,12 +666,12 @@ PW_ZIP_URL="$(json_first_asset_url "$PASSWALL_JSON" "/passwall_packages_apk_${AR
 
 if [ -z "$PW_APK_URL" ]; then
     diagnose_json_failure "$PASSWALL_JSON" "Passwall 2 APK"
-    die "Не найден APK Passwall 2 в последнем релизе."
+    die "Не найден APK Passwall 2 в релизе (${PW_TAG:-unknown})."
 fi
 
 if [ -z "$PW_ZIP_URL" ]; then
     diagnose_json_failure "$PASSWALL_JSON" "passwall_packages_apk_${ARCH}.zip"
-    die "Не найден архив зависимостей passwall_packages_apk_${ARCH}.zip (возможно архитектура '$ARCH' не поддерживается)."
+    die "Не найден архив зависимостей passwall_packages_apk_${ARCH}.zip для архитектуры '$ARCH'."
 fi
 
 info "Нашёл APK: $PW_APK_URL"
@@ -716,7 +687,6 @@ fetch_file "$PW_ZIP_URL" "$PW_DIR/passwall_packages.zip" validate_zip \
     || die "Не удалось скачать архив зависимостей Passwall 2 ни с GitHub, ни с зеркал."
 print_sha256 "$PW_DIR/passwall_packages.zip"
 
-# Финальная проверка перед распаковкой (paranoid, но дёшево).
 validate_zip "$PW_DIR/passwall_packages.zip" \
     || die "Архив зависимостей повреждён после скачивания (не прошёл финальную проверку)."
 
@@ -724,7 +694,6 @@ mkdir -p "$PW_DIR/pkgs"
 unzip -q -o "$PW_DIR/passwall_packages.zip" -d "$PW_DIR/pkgs" \
     || die "Не удалось распаковать зависимости Passwall 2."
 
-# Проверяем что в архиве действительно есть .apk-файлы
 _apk_count="$(find "$PW_DIR/pkgs" -type f -name '*.apk' | wc -l)"
 if [ "$_apk_count" -lt 1 ]; then
     die "В распакованном архиве зависимостей нет .apk-файлов (архив пустой или другого формата)."
@@ -740,61 +709,7 @@ apk add --allow-untrusted "$PW_DIR/luci-app-passwall2.apk" \
     || die "Не удалось установить luci-app-passwall2."
 
 # -----------------------------
-# 8. Argon (soft)
-# -----------------------------
-if [ "$INSTALL_ARGON" = "1" ]; then
-    info "Пробую установить luci-theme-argon из репозитория..."
-    if apk add luci-theme-argon >/dev/null 2>&1; then
-        info "Argon установлен из репозитория."
-    else
-        warn "В репозитории Argon нет, качаю релиз с GitHub..."
-        ARGON_JSON="$ARGON_DIR/latest_argon.json"
-
-        if fetch_file \
-            "https://api.github.com/repos/jerrykuku/luci-theme-argon/releases/latest" \
-            "$ARGON_JSON"
-        then
-            if validate_release_json "$ARGON_JSON"; then
-                ARGON_APK_URL="$(json_first_asset_url "$ARGON_JSON" '/luci-theme-argon(-|_).*[.]apk$')"
-                ARGON_ZIP_URL="$(json_first_asset_url "$ARGON_JSON" '/luci-theme-argon(-|_).*[.]zip$')"
-
-                if [ -n "$ARGON_APK_URL" ]; then
-                    info "Скачиваю Argon APK..."
-                    if fetch_file "$ARGON_APK_URL" "$ARGON_DIR/luci-theme-argon.apk" validate_apk_pkg; then
-                        apk add --allow-untrusted "$ARGON_DIR/luci-theme-argon.apk" \
-                            || warn "Не удалось установить Argon APK (пропускаю)."
-                    else
-                        warn "Не удалось скачать APK Argon (пропускаю)."
-                    fi
-                elif [ -n "$ARGON_ZIP_URL" ]; then
-                    info "Скачиваю Argon ZIP..."
-                    if fetch_file "$ARGON_ZIP_URL" "$ARGON_DIR/argon.zip" validate_zip; then
-                        mkdir -p "$ARGON_DIR/unpacked"
-                        if unzip -q -o "$ARGON_DIR/argon.zip" -d "$ARGON_DIR/unpacked"; then
-                            install_apks_from_dir "$ARGON_DIR/unpacked" \
-                                || warn "Не удалось установить APK из ZIP Argon (пропускаю)."
-                        fi
-                    fi
-                else
-                    warn "В релизе Argon нет ни APK, ни ZIP. Пропускаю."
-                fi
-            else
-                warn "Некорректный JSON релиза Argon. Пропускаю."
-            fi
-        else
-            warn "Не удалось получить JSON релиза Argon. Пропускаю тему."
-        fi
-    fi
-
-    if pkg_installed luci-theme-argon; then
-        info "Активирую Argon..."
-        set_uci_quiet "luci.main.mediaurlbase=/luci-static/argon"
-        uci -q commit luci || true
-    fi
-fi
-
-# -----------------------------
-# 9. System tuning
+# 8. System tuning
 # -----------------------------
 if [ "$APPLY_SYSTEM_TUNING" = "1" ]; then
     info "Применяю системные настройки..."
@@ -812,7 +727,7 @@ if [ "$APPLY_SYSTEM_TUNING" = "1" ]; then
 fi
 
 # -----------------------------
-# 10. Service reload
+# 9. Service reload
 # -----------------------------
 service_do sysntpd  enable
 service_do sysntpd  start
@@ -833,7 +748,7 @@ sync
 sleep 2
 
 # -----------------------------
-# 11. Post-check
+# 10. Post-check
 # -----------------------------
 info "Пост-проверка..."
 verify_required_package ca-bundle
@@ -844,10 +759,6 @@ verify_required_package kmod-nft-tproxy
 verify_required_package dnsmasq-full
 verify_required_package luci-app-passwall2
 
-if [ "$INSTALL_ARGON" = "1" ] && pkg_installed luci-theme-argon; then
-    info "Argon установлен."
-fi
-
 if [ ! -x /etc/init.d/passwall2 ]; then
     warn "init-скрипт passwall2 не найден. Проверь пакет вручную."
 fi
@@ -855,15 +766,12 @@ fi
 ROLLBACK_NEEDED=0
 
 # -----------------------------
-# 12. Summary
+# 11. Summary
 # -----------------------------
 echo
 echo '================ DONE ================'
 info "Passwall 2 установлен (${SCRIPT_VERSION})."
 info "LuCI -> Services -> Passwall 2"
-if [ "$INSTALL_ARGON" = "1" ] && pkg_installed luci-theme-argon; then
-    info "Theme -> Argon"
-fi
 info "Бэкап конфигов: $BACKUP_ROOT"
 [ -n "$PW_TAG" ] && info "Версия Passwall 2: $PW_TAG"
 echo '======================================'
