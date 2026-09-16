@@ -24,7 +24,7 @@ umask 022
 # -----------------------------
 # User options (env overrides)
 # -----------------------------
-INSTALL_ARGON="${INSTALL_ARGON:-1}"
+INSTALL_ARGON="${INSTALL_ARGON:-0}"
 APPLY_SYSTEM_TUNING="${APPLY_SYSTEM_TUNING:-0}"
 AUTO_REBOOT="${AUTO_REBOOT:-0}"
 STRICT_APK_UPDATE="${STRICT_APK_UPDATE:-0}"
